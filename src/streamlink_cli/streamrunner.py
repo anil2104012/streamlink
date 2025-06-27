@@ -122,13 +122,13 @@ class StreamRunner:
         except _ReadError as err:
             raise OSError(f"Error when reading from stream: {err.__context__}, exiting") from err.__context__
 
-        except OSError as err:
-            if self.playerpoller and err.errno in ACCEPTABLE_ERRNO:
+        except OSError as error:
+            if self.playerpoller and error.errno in ACCEPTABLE_ERRNO:
                 self.playerpoller.playerclosed()
             elif isinstance(self.output, HTTPOutput) and err.errno in ACCEPTABLE_ERRNO:
                 log.info("HTTP connection closed")
             else:
-                raise OSError(f"Error when writing to output: {err}, exiting") from err
+                raise OSError(f"Error when writing to output: {error}, exiting") from error
 
         finally:
             if self.playerpoller:
