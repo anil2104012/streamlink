@@ -7,7 +7,7 @@ from threading import Event, Lock, Thread
 
 from streamlink.stream.stream import StreamIO
 from streamlink_cli.console.progress import Progress
-from streamlink_cli.output import HTTPOutput, Output, PlayerOutput
+from streamlink_cli.output import HTTPOutput, Output, PlayerOutput, JSONOutput
 
 
 # Use the main Streamlink CLI module as logger
@@ -122,13 +122,15 @@ class StreamRunner:
         except _ReadError as err:
             raise OSError(f"Error when reading from stream: {err.__context__}, exiting") from err.__context__
 
-        except OSError as err:
-            if self.playerpoller and err.errno in ACCEPTABLE_ERRNO:
+        except OSError as error:
+            if self.playerpoller and error.errno in ACCEPTABLE_ERRNO:
                 self.playerpoller.playerclosed()
-            elif isinstance(self.output, HTTPOutput) and err.errno in ACCEPTABLE_ERRNO:
+            elif isinstance(self.output, HTTPOutput) and error.errno in ACCEPTABLE_ERRNO:
                 log.info("HTTP connection closed")
+            elif isinstance(self.output, JSONOutput) and error.errno in ACCEPTABLE_ERRNO:
+                log.info("JSON output connection closed")
             else:
-                raise OSError(f"Error when writing to output: {err}, exiting") from err
+                raise OSError(f"Error when writing to output: {error}, exiting") from error
 
         finally:
             if self.playerpoller:
