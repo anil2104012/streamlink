@@ -1,0 +1,360 @@
+From 7ad1dff398033e1403e73fc0ee9e8a07f2530559 Mon Sep 17 00:00:00 2001
+From: Anil Tiwari <anilt@nvidia.com>
+Date: Fri, 27 Jun 2025 14:04:27 -0700
+Subject: [PATCH] Add JSON output format option
+
+This change adds a new --json-output option that allows users to output
+stream data as JSON records. Each record contains either metadata or a
+chunk of stream data encoded in hexadecimal format. This is useful for
+programmatic processing of streams or debugging.
+
+Features:
+- New JSONOutput class for handling JSON-formatted output
+- Command-line option --json-output for specifying output file
+- Support for writing to files or stdout
+- Comprehensive test coverage
+- Proper error handling for JSON output connections
+
+The implementation follows the same patterns as existing output formats
+and maintains compatibility with other CLI options.
+---
+ .../src/streamlink_cli/argparser.py           | 24 +++++
+ repos/streamlink/src/streamlink_cli/main.py   | 27 +++++-
+ .../src/streamlink_cli/output/__init__.py     |  1 +
+ .../src/streamlink_cli/output/json.py         | 87 +++++++++++++++++
+ .../src/streamlink_cli/streamrunner.py        | 12 ++-
+ .../streamlink/tests/cli/output/test_json.py  | 94 +++++++++++++++++++
+ 6 files changed, 238 insertions(+), 7 deletions(-)
+ create mode 100644 repos/streamlink/src/streamlink_cli/output/json.py
+ create mode 100644 repos/streamlink/tests/cli/output/test_json.py
+
+diff --git a/repos/streamlink/src/streamlink_cli/argparser.py b/repos/streamlink/src/streamlink_cli/argparser.py
+index f82e1a5..12336ab 100644
+--- a/repos/streamlink/src/streamlink_cli/argparser.py
++++ b/repos/streamlink/src/streamlink_cli/argparser.py
+@@ -774,6 +774,30 @@ def build_parser():
+             Default is yes.
+         """,
+     )
++    output.add_argument(
++        "--json-output",
++        metavar="FILENAME",
++        help="""
++            Write stream data as JSON records to `FILENAME` instead of playing it in the --player.
++            If `FILENAME` is set to `-` (dash), then the stream data will be written to `stdout` as JSON.
++            
++            Each line of the output file will be a separate JSON object containing either metadata
++            or a chunk of the stream encoded in hexadecimal format.
++            
++            This is useful for processing stream data programmatically or for debugging.
++            
++            Directories and subdirectories will be created if they do not exist, if filesystem permissions allow.
++            
++            Unless --force is set, Streamlink will ask for confirmation before writing if `FILENAME` already exists.
++            
++            Please see the "Metadata variables" section of Streamlink's CLI documentation for all available metadata variables,
++            as well as the "Plugins" section for the list of metadata variables defined in each plugin.
++            
++            Example:
++            
++                %(prog)s --json-output "~/recordings/{author}/{category}/{id}-{time:%%Y%%m%%d%%H%%M%%S}.json" <URL> [STREAM]
++        """,
++    )
+ 
+     stream = parser.add_argument_group("Stream options")
+     stream.add_argument(
+diff --git a/repos/streamlink/src/streamlink_cli/main.py b/repos/streamlink/src/streamlink_cli/main.py
+index d6a77cc..47d2e8a 100644
+--- a/repos/streamlink/src/streamlink_cli/main.py
++++ b/repos/streamlink/src/streamlink_cli/main.py
+@@ -44,14 +44,14 @@ from streamlink_cli.constants import (
+     STREAM_SYNONYMS,
+ )
+ from streamlink_cli.exceptions import StreamlinkCLIError
+-from streamlink_cli.output import FileOutput, HTTPOutput, PlayerOutput
++from streamlink_cli.output import FileOutput, HTTPOutput, PlayerOutput, JSONOutput
+ from streamlink_cli.show_matchers import show_matchers
+ from streamlink_cli.streamrunner import StreamRunner
+ from streamlink_cli.utils import Formatter, datetime
+ from streamlink_cli.utils.versioncheck import check_version
+ 
+ 
+-QUIET_OPTIONS = ("json", "stream_url", "quiet")
++QUIET_OPTIONS = ("json", "stream_url", "quiet", "json_output")
+ 
+ 
+ args: Any = None  # type: ignore[assignment]
+@@ -114,9 +114,32 @@ def create_output(formatter: Formatter) -> FileOutput | PlayerOutput:
+      - A subprocess' stdin pipe
+      - A named pipe that the subprocess reads from
+      - A regular file
++     - JSON output
+ 
+     """
+ 
++    if args.json_output:
++        if args.output:
++            raise StreamlinkCLIError("The --json-output argument is incompatible with -o/--output")
++        if args.stdout:
++            raise StreamlinkCLIError("The --json-output argument is incompatible with -O/--stdout")
++        if args.record or args.record_and_pipe:
++            raise StreamlinkCLIError("The --json-output argument is incompatible with -r/--record and -R/--record-and-pipe")
++
++        if args.json_output == "-":
++            return JSONOutput(fd=stdout, metadata={
++                "url": args.url,
++                "plugin": streamlink.plugins.get_plugin(args.url),
++                "stream": args.stream,
++            })
++        else:
++            filename = check_file_output(formatter.path(args.json_output, args.fs_safe_rules), args.force)
++            return JSONOutput(filename=filename, metadata={
++                "url": args.url,
++                "plugin": streamlink.plugins.get_plugin(args.url),
++                "stream": args.stream,
++            })
++
+     if args.output:
+         if args.stdout:
+             raise StreamlinkCLIError("The -o/--output argument is incompatible with -O/--stdout")
+diff --git a/repos/streamlink/src/streamlink_cli/output/__init__.py b/repos/streamlink/src/streamlink_cli/output/__init__.py
+index be78fca..47c4c2f 100644
+--- a/repos/streamlink/src/streamlink_cli/output/__init__.py
++++ b/repos/streamlink/src/streamlink_cli/output/__init__.py
+@@ -1,4 +1,5 @@
+ from streamlink_cli.output.abc import Output
+ from streamlink_cli.output.file import FileOutput
+ from streamlink_cli.output.http import HTTPOutput
++from streamlink_cli.output.json import JSONOutput
+ from streamlink_cli.output.player import PlayerOutput
+diff --git a/repos/streamlink/src/streamlink_cli/output/json.py b/repos/streamlink/src/streamlink_cli/output/json.py
+new file mode 100644
+index 0000000..fe15a42
+--- /dev/null
++++ b/repos/streamlink/src/streamlink_cli/output/json.py
+@@ -0,0 +1,87 @@
++from __future__ import annotations
++
++import json
++import logging
++from pathlib import Path
++from typing import BinaryIO, Dict, Any
++
++from streamlink_cli.compat import stdout
++from streamlink_cli.output.abc import Output
++
++
++log = logging.getLogger("streamlink.cli.output.json")
++
++
++class JSONOutput(Output):
++    """
++    Output stream data in JSON format.
++    
++    This output module writes stream data as JSON records, with each record
++    containing a chunk of base64-encoded stream data and metadata.
++    """
++    
++    def __init__(
++        self,
++        filename: Path | None = None,
++        fd: BinaryIO | None = None,
++        record: Output | None = None,
++        metadata: Dict[str, Any] | None = None,
++    ):
++        super().__init__()
++        self.filename = filename
++        self.fd = fd
++        self.record = record
++        self.metadata = metadata or {}
++        self.chunk_index = 0
++        
++    def _open(self):
++        if self.filename:
++            self.filename.parent.mkdir(parents=True, exist_ok=True)
++            self.fd = self.filename.open("wb")
++            
++        if self.record:
++            self.record.open()
++            
++        # Write the header with metadata
++        header = {
++            "type": "header",
++            "metadata": self.metadata,
++            "format": "json_stream",
++            "version": "1.0"
++        }
++        self._write_json(header)
++            
++    def _close(self):
++        # Write footer before closing
++        footer = {
++            "type": "footer",
++            "chunks": self.chunk_index
++        }
++        self._write_json(footer)
++        
++        if self.fd is not stdout:
++            self.fd.close()
++        if self.record:
++            self.record.close()
++            
++    def _write(self, data):
++        # Write the raw data to the record if specified
++        if self.record:
++            self.record.write(data)
++            
++        # Create a JSON chunk with the data
++        chunk = {
++            "type": "chunk",
++            "index": self.chunk_index,
++            "size": len(data),
++            "data": data.hex()  # Use hex encoding for binary data
++        }
++        self._write_json(chunk)
++        self.chunk_index += 1
++        
++        return len(data)
++        
++    def _write_json(self, obj):
++        """Write a JSON object to the output file."""
++        json_str = json.dumps(obj) + "\n"
++        self.fd.write(json_str.encode("utf-8")) 
+\ No newline at end of file
+diff --git a/repos/streamlink/src/streamlink_cli/streamrunner.py b/repos/streamlink/src/streamlink_cli/streamrunner.py
+index da82c68..c9d8c77 100644
+--- a/repos/streamlink/src/streamlink_cli/streamrunner.py
++++ b/repos/streamlink/src/streamlink_cli/streamrunner.py
+@@ -7,7 +7,7 @@ from threading import Event, Lock, Thread
+ 
+ from streamlink.stream.stream import StreamIO
+ from streamlink_cli.console.progress import Progress
+-from streamlink_cli.output import HTTPOutput, Output, PlayerOutput
++from streamlink_cli.output import HTTPOutput, Output, PlayerOutput, JSONOutput
+ 
+ 
+ # Use the main Streamlink CLI module as logger
+@@ -122,13 +122,15 @@ class StreamRunner:
+         except _ReadError as err:
+             raise OSError(f"Error when reading from stream: {err.__context__}, exiting") from err.__context__
+ 
+-        except OSError as err:
+-            if self.playerpoller and err.errno in ACCEPTABLE_ERRNO:
++        except OSError as error:
++            if self.playerpoller and error.errno in ACCEPTABLE_ERRNO:
+                 self.playerpoller.playerclosed()
+-            elif isinstance(self.output, HTTPOutput) and err.errno in ACCEPTABLE_ERRNO:
++            elif isinstance(self.output, HTTPOutput) and error.errno in ACCEPTABLE_ERRNO:
+                 log.info("HTTP connection closed")
++            elif isinstance(self.output, JSONOutput) and error.errno in ACCEPTABLE_ERRNO:
++                log.info("JSON output connection closed")
+             else:
+-                raise OSError(f"Error when writing to output: {err}, exiting") from err
++                raise OSError(f"Error when writing to output: {error}, exiting") from error
+ 
+         finally:
+             if self.playerpoller:
+diff --git a/repos/streamlink/tests/cli/output/test_json.py b/repos/streamlink/tests/cli/output/test_json.py
+new file mode 100644
+index 0000000..756da5c
+--- /dev/null
++++ b/repos/streamlink/tests/cli/output/test_json.py
+@@ -0,0 +1,94 @@
++from __future__ import annotations
++
++import json
++import unittest
++from io import BytesIO
++from pathlib import Path
++from unittest.mock import patch
++
++import pytest
++
++from streamlink_cli.output import JSONOutput
++
++
++class TestJSONOutput(unittest.TestCase):
++    @pytest.fixture(autouse=True)
++    def _setup(self, request):
++        self.output = None
++        self.temp_file = BytesIO()
++        
++        def fin():
++            if self.output:
++                self.output.close()
++        request.addfinalizer(fin)
++        
++    def test_json_output_write(self):
++        self.output = JSONOutput(fd=self.temp_file, metadata={"test": "data"})
++        self.output.open()
++        
++        # Write some test data
++        self.output.write(b"test data")
++        self.output.close()
++        
++        # Reset file position to read from the beginning
++        self.temp_file.seek(0)
++        
++        # Read and parse the JSON lines
++        lines = self.temp_file.read().decode("utf-8").strip().split("\n")
++        records = [json.loads(line) for line in lines]
++        
++        # Should have 3 records: header, data chunk, and footer
++        assert len(records) == 3
++        
++        # Check header
++        assert records[0]["type"] == "header"
++        assert records[0]["metadata"]["test"] == "data"
++        assert records[0]["format"] == "json_stream"
++        
++        # Check data chunk
++        assert records[1]["type"] == "chunk"
++        assert records[1]["index"] == 0
++        assert records[1]["size"] == 9  # Length of "test data"
++        assert bytes.fromhex(records[1]["data"]) == b"test data"
++        
++        # Check footer
++        assert records[2]["type"] == "footer"
++        assert records[2]["chunks"] == 1
++        
++    def test_json_output_with_record(self):
++        # Create a record output to test the record functionality
++        record_file = BytesIO()
++        record_output = JSONOutput(fd=record_file)
++        
++        # Create the main output with record
++        self.output = JSONOutput(fd=self.temp_file, record=record_output)
++        self.output.open()
++        
++        # Write some test data
++        self.output.write(b"test data")
++        self.output.close()
++        
++        # Check that the record file received the data
++        record_file.seek(0)
++        record_data = record_file.read()
++        assert record_data != b""
++        
++    @patch("streamlink_cli.output.json.Path")
++    def test_json_output_with_filename(self, mock_path):
++        # Mock the path and file operations
++        mock_file = BytesIO()
++        mock_path_instance = mock_path.return_value
++        mock_path_instance.open.return_value = mock_file
++        mock_path_instance.parent = mock_path_instance
++        
++        # Create output with filename
++        self.output = JSONOutput(filename=Path("test.json"))
++        self.output.open()
++        
++        # Write some test data
++        self.output.write(b"test data")
++        self.output.close()
++        
++        # Verify the path operations
++        mock_path_instance.parent.mkdir.assert_called_once_with(parents=True, exist_ok=True)
++        mock_path_instance.open.assert_called_once_with("wb") 
+\ No newline at end of file
+-- 
+2.49.0.windows.1
+

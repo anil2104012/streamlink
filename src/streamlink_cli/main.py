@@ -44,14 +44,14 @@ from streamlink_cli.constants import (
     STREAM_SYNONYMS,
 )
 from streamlink_cli.exceptions import StreamlinkCLIError
-from streamlink_cli.output import FileOutput, HTTPOutput, PlayerOutput
+from streamlink_cli.output import FileOutput, HTTPOutput, PlayerOutput, JSONOutput
 from streamlink_cli.show_matchers import show_matchers
 from streamlink_cli.streamrunner import StreamRunner
 from streamlink_cli.utils import Formatter, datetime
 from streamlink_cli.utils.versioncheck import check_version
 
 
-QUIET_OPTIONS = ("json", "stream_url", "quiet")
+QUIET_OPTIONS = ("json", "stream_url", "quiet", "json_output")
 
 
 args: Any = None  # type: ignore[assignment]
@@ -114,8 +114,31 @@ def create_output(formatter: Formatter) -> FileOutput | PlayerOutput:
      - A subprocess' stdin pipe
      - A named pipe that the subprocess reads from
      - A regular file
+     - JSON output
 
     """
+
+    if args.json_output:
+        if args.output:
+            raise StreamlinkCLIError("The --json-output argument is incompatible with -o/--output")
+        if args.stdout:
+            raise StreamlinkCLIError("The --json-output argument is incompatible with -O/--stdout")
+        if args.record or args.record_and_pipe:
+            raise StreamlinkCLIError("The --json-output argument is incompatible with -r/--record and -R/--record-and-pipe")
+
+        if args.json_output == "-":
+            return JSONOutput(fd=stdout, metadata={
+                "url": args.url,
+                "plugin": streamlink.plugins.get_plugin(args.url),
+                "stream": args.stream,
+            })
+        else:
+            filename = check_file_output(formatter.path(args.json_output, args.fs_safe_rules), args.force)
+            return JSONOutput(filename=filename, metadata={
+                "url": args.url,
+                "plugin": streamlink.plugins.get_plugin(args.url),
+                "stream": args.stream,
+            })
 
     if args.output:
         if args.stdout:

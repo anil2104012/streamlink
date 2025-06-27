@@ -774,6 +774,30 @@ def build_parser():
             Default is yes.
         """,
     )
+    output.add_argument(
+        "--json-output",
+        metavar="FILENAME",
+        help="""
+            Write stream data as JSON records to `FILENAME` instead of playing it in the --player.
+            If `FILENAME` is set to `-` (dash), then the stream data will be written to `stdout` as JSON.
+            
+            Each line of the output file will be a separate JSON object containing either metadata
+            or a chunk of the stream encoded in hexadecimal format.
+            
+            This is useful for processing stream data programmatically or for debugging.
+            
+            Directories and subdirectories will be created if they do not exist, if filesystem permissions allow.
+            
+            Unless --force is set, Streamlink will ask for confirmation before writing if `FILENAME` already exists.
+            
+            Please see the "Metadata variables" section of Streamlink's CLI documentation for all available metadata variables,
+            as well as the "Plugins" section for the list of metadata variables defined in each plugin.
+            
+            Example:
+            
+                %(prog)s --json-output "~/recordings/{author}/{category}/{id}-{time:%%Y%%m%%d%%H%%M%%S}.json" <URL> [STREAM]
+        """,
+    )
 
     stream = parser.add_argument_group("Stream options")
     stream.add_argument(
