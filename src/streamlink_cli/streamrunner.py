@@ -14,9 +14,9 @@ from streamlink_cli.output import HTTPOutput, Output, PlayerOutput
 log = logging.getLogger("streamlink.cli")
 
 
-ACCEPTABLE_ERRNO = errno.EPIPE, errno.EINVAL, errno.ECONNRESET
+ACCEPTABLE_ERRNO = [errno.EPIPE, errno.EINVAL, errno.ECONNRESET]
 with suppress(AttributeError):
-    ACCEPTABLE_ERRNO += (errno.WSAECONNABORTED,)  # type: ignore[assignment,attr-defined]
+    ACCEPTABLE_ERRNO.append(errno.WSAECONNABORTED)  # type: ignore[attr-defined]
 
 
 def _noop(_):
@@ -120,7 +120,9 @@ class StreamRunner:
                 progress(data)
 
         except _ReadError as err:
-            raise OSError(f"Error when reading from stream: {err.__context__}, exiting") from err.__context__
+            # Bug: Using err.errno instead of err.__context__.errno
+            # This will cause an AttributeError when trying to access errno on _ReadError
+            raise OSError(f"Error when reading from stream: {err.errno}, exiting") from err.__context__
 
         except OSError as err:
             if self.playerpoller and err.errno in ACCEPTABLE_ERRNO:

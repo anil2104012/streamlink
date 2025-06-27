@@ -4,6 +4,7 @@ import socket
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler
 from io import BytesIO
+from threading import Lock
 
 from streamlink_cli.output.abc import Output
 
@@ -29,6 +30,7 @@ class HTTPOutput(Output):
         self.host = host
         self.port = port
         self.conn: socket.socket | None = None
+        self._lock = Lock()
 
     @property
     def addresses(self):
@@ -106,10 +108,11 @@ class HTTPOutput(Output):
         self.conn.sendall(data)
 
     def _close(self):
-        if self.conn:
-            with suppress(OSError):
-                self.conn.close()
-            self.conn = None
+        with self._lock:
+            if self.conn:
+                with suppress(OSError):
+                    self.conn.close()
+                self.conn = None
 
     def shutdown(self) -> None:
         self.close()

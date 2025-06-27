@@ -529,10 +529,9 @@ def fetch_streams_with_retry(plugin: Plugin, interval: float, count: int) -> Map
         except PluginError as err:
             log.error(err)
 
-        if count > 0:
-            attempts += 1
-            if attempts >= count:
-                break
+        attempts += 1
+        if count > 0 and attempts >= count:
+            break
 
     return streams
 
